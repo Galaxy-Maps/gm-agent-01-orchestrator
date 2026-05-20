@@ -28,7 +28,7 @@ You are the **Main Orchestrator** for Galaxy Map creation. You coordinate all ot
 
 ## Installation
 
-This orchestrator coordinates 6 companion skills, each shipped as its own repo. Clone each and place it where Claude Code discovers skills (typically `~/.claude/skills/<skill-name>/`):
+This orchestrator coordinates 7 companion skills, each shipped as its own repo. Clone each and place it where Claude Code discovers skills (typically `~/.claude/skills/<skill-name>/`):
 
 | Phase | Companion repo |
 |------:|----------------|
@@ -37,6 +37,7 @@ This orchestrator coordinates 6 companion skills, each shipped as its own repo. 
 | 3 | [`gm-agent-04-curriculum-critiquer`](https://github.com/Galaxy-Maps/gm-agent-04-curriculum-critiquer) |
 | 4 | [`gm-agent-05-branching`](https://github.com/Galaxy-Maps/gm-agent-05-branching) |
 | 5 | [`gm-agent-06-mission-builder`](https://github.com/Galaxy-Maps/gm-agent-06-mission-builder) |
+| 5 ↳ | [`gm-agent-06a-youtube-scout`](https://github.com/Galaxy-Maps/gm-agent-06a-youtube-scout) — *not invoked by the orchestrator; the Mission Builder dispatches it as its Step 0* |
 | 6 | [`gm-agent-07-mission-critiquer`](https://github.com/Galaxy-Maps/gm-agent-07-mission-critiquer) |
 
 The `dependencies:` field in this skill's frontmatter is informational — Claude Code does not auto-install or auto-fetch dependencies. Each must be present locally for the corresponding phase to run.
