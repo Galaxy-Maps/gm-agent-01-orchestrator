@@ -16,6 +16,7 @@ dependencies:
   - gm-ai-curriculum-critiquer
   - gm-ai-branching
   - gm-ai-mission-builder
+  - gm-ai-youtube-scout
   - gm-ai-mission-critiquer
 model: high
 ---
@@ -28,7 +29,7 @@ You are the **Main Orchestrator** for Galaxy Map creation. You coordinate all ot
 
 ## Installation
 
-This orchestrator coordinates 6 companion skills, each shipped as its own repo. Clone each and place it where Claude Code discovers skills (typically `~/.claude/skills/<skill-name>/`):
+This orchestrator coordinates 7 companion skills, each shipped as its own repo. Clone each and place it where Claude Code discovers skills (typically `~/.claude/skills/<skill-name>/`):
 
 | Phase | Companion repo |
 |------:|----------------|
@@ -37,6 +38,7 @@ This orchestrator coordinates 6 companion skills, each shipped as its own repo. 
 | 3 | [`gm-agent-04-curriculum-critiquer`](https://github.com/Galaxy-Maps/gm-agent-04-curriculum-critiquer) |
 | 4 | [`gm-agent-05-branching`](https://github.com/Galaxy-Maps/gm-agent-05-branching) |
 | 5 | [`gm-agent-06-mission-builder`](https://github.com/Galaxy-Maps/gm-agent-06-mission-builder) |
+| 5 | [`gm-agent-06a-youtube-scout`](https://github.com/Galaxy-Maps/gm-agent-06a-youtube-scout) (dispatched by the mission-builder, post-draft) |
 | 6 | [`gm-agent-07-mission-critiquer`](https://github.com/Galaxy-Maps/gm-agent-07-mission-critiquer) |
 
 The `dependencies:` field in this skill's frontmatter is informational — Claude Code does not auto-install or auto-fetch dependencies. Each must be present locally for the corresponding phase to run.
@@ -78,8 +80,7 @@ For the Agent Teams variant of this stack, install the `gm-agent-0Na-*-with-agen
 | `Bash` | `git init`, final commit (GALAXY_MAP.json), `git push` |
 | `Read` | Read committed `.md` / `.html` files during final transformation |
 | `Write` | Write `GALAXY_MAP.json` |
-| `Skill` | Invoke companion `gm-agent-*` skills by name |
-| `Task` | Spawn parallel mission-builder sub-agents in Phase 5 |
+| `Skill` | Invoke companion `gm-agent-*` skills by name (incl. mission-builder, one mission at a time in Phase 5) |
 | `AskUserQuestion` | Phase-boundary decisions (alternative selection, critique rounds, publish) |
 
 Saving to the Galaxy Maps database is delegated to whatever cloud-function client the host project provides; the orchestrator only writes `GALAXY_MAP.json` to the repo.
@@ -149,39 +150,48 @@ THEN:
   - Ask user: "Ready to generate mission content?"
 ```
 
-### Phase 5: Mission Building (Parallel)
+### Phase 5: Mission Building (Sequential, journey-aware)
 ```
-ACTION: Parse MAP_V{final}.md into stars
-FOR EACH star (in parallel):
-  Invoke gm-ai-mission-builder skill
-  HANDOFF: {
-    action: "build-missions",
-    star: { index, title, missions[] },
-    context: { INTENT.md contents },
-    outputPath: "missions/star_{n}/"
-  }
+ACTION: Parse MAP_V{final}.md into stars → missions (in order)
+FOR EACH star (in order):
+  FOR EACH mission in the star (in order):
+    Invoke gm-ai-mission-builder skill   # ONE at a time — wait for each handoff
+    HANDOFF: {
+      action: "build-mission",
+      star: { index, title },
+      mission: { index, title, lo },
+      context: { INTENT.md contents, previousMissionLO, nextMissionLO, starMilestone },
+      repoPath,                          # builder reads/updates JOURNEY.md here
+      outputPath: "missions/star_{n}/"
+    }
+    WAIT_FOR: builder handoff (it self-validates, commits the mission + JOURNEY.md,
+              and dispatches gm-ai-youtube-scout itself, post-draft)
 
-WAIT_FOR: All parallel agents complete (each commits missions/star_{n}/* independently)
+WHY SEQUENTIAL: each mission is built with the full developing journey (JOURNEY.md) in view, so the
+course coheres start-to-finish. This is intentional — coherence over the time savings of parallelism.
 
 THEN:
   - Ask user: "Would you like missions critiqued?"
 ```
 
-### Phase 6: Mission Critique (Optional, Parallel)
+### Phase 6: Mission Critique (Optional)
 ```
 IF user wants mission critique:
-  FOR EACH mission (in parallel batches):
+  FOR EACH mission (in order):
     Invoke gm-ai-mission-critiquer skill
     HANDOFF: {
       action: "critique-mission",
       files: ["MISSION_{x}_{y}.md", "MISSION_{x}_{y}.html"],
-      context: { INTENT.md, star context, next mission LO }
+      context: { INTENT.md, star context, adjacent mission LOs, JOURNEY.md, priorMissions[] }
     }
-
   WAIT_FOR: Interactive sessions complete (suggestions committed by critiquer)
 
+  THEN once, after all missions:
+    Invoke gm-ai-mission-critiquer skill with action: "critique-journey"
+      → assesses the end-to-end learning arc; writes MAP_JOURNEY_SUGGESTIONS.md
+
   THEN:
-    - For each approved suggestion, invoke gm-ai-mission-builder to regenerate
+    - For each approved suggestion, invoke gm-ai-mission-builder to regenerate (it re-validates)
     - WAIT_FOR: Updated missions committed by mission-builder
 ```
 
@@ -193,15 +203,21 @@ STEPS:
   2. Read INTENT.md → extract title, description
   3. Read MAP_V{final}.md → parse stars structure
   4. For each star, for each mission:
-     - Read missions/star_n/MISSION_n_m.html
+     - Read missions/star_n/MISSION_n_m.html  (now a FULL single-file 3D player, not a fragment)
      - Attach as missionInstructionsHtmlString
-  5. Construct saveGalaxyMap payload
+  5. Construct saveGalaxyMap payload (add "missionRenderMode": "iframe" — see note below)
   6. Write GALAXY_MAP.json to repo
   7. git add GALAXY_MAP.json
   8. git commit -m "chore(archive): add final GALAXY_MAP.json"
   9. git push origin main
   10. Call saveGalaxyMap() cloud function
   11. Return courseId to user
+
+⚠ CONTRACT CHANGE (v2): missionInstructionsHtmlString is now a COMPLETE HTML document (its own
+<html>/<head>/<script> with CDN Three.js + GSAP), not an inline .mission-content fragment. The GM app
+must render it in an isolated document context — `<iframe srcdoc={missionInstructionsHtmlString}>` —
+NOT inject it inline. The player is self-contained and also opens standalone in a browser. (App-side
+change; flagged for maintainers.)
 ```
 
 ---
@@ -238,8 +254,10 @@ git push origin main
 | 2 | gm-ai-curriculum | `feat(curriculum): add curriculum structure v{n}` | MAP_V{n}.md |
 | 3 | gm-ai-curriculum-critiquer | `review(curriculum): add suggestions for MAP v{n}` | MAP_V{n}_SUGGESTIONS.md |
 | 4 | gm-ai-branching | `feat(branching): add {branch-type} branch for Star {n}` | branches/* |
-| 5 | gm-ai-mission-builder | `feat(missions): add all missions for Star {n}` | missions/star_{n}/* |
+| 5 | gm-ai-mission-builder | `feat(missions): add Mission {n}.{m} - {title}` | missions/star_{n}/MISSION_{n}_{m}.*, JOURNEY.md |
+| 5 | gm-ai-youtube-scout | `feat(resources): add YouTube resources for Mission {n}.{m}` | resources/* (dispatched by the builder, post-draft) |
 | 6 | gm-ai-mission-critiquer | `review(mission): add suggestions for Mission {n}.{m}` | MISSION_{n}_{m}_SUGGESTIONS.md |
+| 6 | gm-ai-mission-critiquer | `review(journey): assess full learning arc` | MAP_JOURNEY_SUGGESTIONS.md |
 | 6 | gm-ai-mission-builder | `fix(mission): apply review feedback to Mission {n}.{m}` | missions/star_{n}/MISSION_{n}_{m}.* |
 | 7 | **gm-ai-orchestrator** | `chore(archive): add final GALAXY_MAP.json` | GALAXY_MAP.json |
 
@@ -309,7 +327,9 @@ function transformRepoToGalaxyMap(repoPath: string): SaveGalaxyMapInput {
       return {
         title: mission.title,
         description: mission.learningObjective,
-        missionInstructionsHtmlString: readFile(htmlPath) || null
+        // v2: a COMPLETE single-file 3D player document — render app-side via <iframe srcdoc>, not inline.
+        missionInstructionsHtmlString: readFile(htmlPath) || null,
+        missionRenderMode: "iframe"
       };
     })
   }));
@@ -339,12 +359,22 @@ Skill({
   args: JSON.stringify({ files: ["INTENT.md"], repoPath })
 })
 
-// Parallel mission building
-stars.forEach(star => {
-  Task({
-    subagent_type: "general-purpose",
-    prompt: `Invoke gm-ai-mission-builder for Star ${star.index}`,
-    run_in_background: true
-  })
-})
+// Sequential, journey-aware mission building — ONE mission at a time, in order.
+// Each builder reads/updates JOURNEY.md, self-validates, commits, and dispatches the
+// youtube-scout itself (post-draft). Wait for each handoff before the next.
+for (const star of stars) {
+  for (const mission of star.missions) {
+    Skill({
+      skill: "gm-ai-mission-builder",
+      args: JSON.stringify({
+        action: "build-mission",
+        star: { index: star.index, title: star.title },
+        mission: { index: mission.index, title: mission.title, lo: mission.lo },
+        context: { /* INTENT.md, previousMissionLO, nextMissionLO, starMilestone */ },
+        repoPath,
+        outputPath: `missions/star_${star.index}/`
+      })
+    });
+  }
+}
 ```
